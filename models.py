@@ -89,3 +89,4 @@ class LeaderboardFilter(Enum):
 
 class UnsupportedFilter(Exception): pass
 class NoCredentials(Exception): pass
+class LoginError(Exception): pass
