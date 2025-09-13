@@ -144,6 +144,12 @@ class Kovaaks:
         resp.raise_for_status()
         return [PlayerSearchResult(*x.values()) for x in resp.json()]
     
+    def scenario_by_user(self, scenario_name: str) -> json:
+        scenario_by_user = f"https://kovaaks.com/webapp-backend/user/scenario/last-scores/by-name?username={self._username}&scenarioName={scenario_name}"
+        response = self.session.get(scenario_by_user)
+        response.raise_for_status()
+        return response.json()
+
 if __name__ == "__main__":
     beanTSId=2648
 
@@ -161,13 +167,12 @@ if __name__ == "__main__":
     else:
         kvk = Kovaaks()
 
-
     # gets user data only
     # response = kvk.session.get("https://kovaaks.com/webapp-backend/user/search?username=lawbstuh")
 
-    response = kvk.session.get(f"https://kovaaks.com/webapp-backend/leaderboard/scores/global?leaderboardId={2}&page={0}&max={5}")
-    # scenario_by_user = f"https://kovaaks.com/webapp-backend/user/scenario/last-scores/by-name?username=lawbstuh&scenarioName=beanTS"
-    # response = kvk.session.get(scenario_by_user)
+    # response = kvk.session.get(f"https://kovaaks.com/webapp-backend/leaderboard/scores/global?leaderboardId={2}&page={0}&max={5}")
+    scenario_by_user = f"https://kovaaks.com/webapp-backend/user/scenario/last-scores/by-name?username=lawbstuh&scenarioName=beanTS"
+    response = kvk.session.get(scenario_by_user)
     response.raise_for_status()
     res = response.json()
     print(len(res))
