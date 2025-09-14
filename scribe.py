@@ -4,7 +4,8 @@ from pathlib import Path
 import csv
 import json
 import sqlite3
-from datetime import date, datetime
+from datetime import datetime
+from dataclasses import astuple, dataclass
 
 from kovaaks import Kovaaks
 
@@ -13,9 +14,7 @@ dotenv.load_dotenv()
 SCRIPT_LOCATION = Path(__file__).resolve().parent
 KOVAAKS_USERNAME = os.getenv("KOVAAKS_USERNAME")
 KOVAAKS_DATABASE = os.getenv("KOVAAKS_DATABASE")
-DATE_FORMAT = "%Y%m%d"
-
-# stats = Path("C:\\Program Files\\Steam\\steamapps\\common\\FPSAimTrainer\\FPSAimTrainer\\stats")
+KOVAAKS_STATS = os.getenv("KOVAAKS_STATS")
 
 # update modes: all, by difficulty, by specific?
 # store each score by date
@@ -42,18 +41,16 @@ DATE_FORMAT = "%Y%m%d"
 # ***IMPLEMENT LATER***
 # benchmarks table
 
-# main = [
-#     "score",
-#     "attributes"
-# ]
-# attribute_keys = [
-#     "epoch",
-#     "cm360",
-#     "avgTtk",
-#     "accuracyDamage"
-# ]
-
-
+@dataclass
+class ScenarioData:
+    scoreid:int
+    userid:int
+    scenario_name:str
+    timestamp:int
+    score:int
+    cm:float
+    ttk:float
+    acc:int
 
 class Scribe:
     def __init__(self, database: str=KOVAAKS_DATABASE, username: str=KOVAAKS_USERNAME):
@@ -79,10 +76,9 @@ class Scribe:
         con.commit()
         con.close()
 
-        return userid
-        
+        return userid    
 
-    def _create_tables(self):
+    def _create_tables(self) -> None:
         con = sqlite3.connect(self._database)
         cur = con.cursor()
 
@@ -115,57 +111,34 @@ class Scribe:
         con.commit()
         con.close()
 
-    def get_scenario_data(self, scenario_name: str) -> json:
-        return self._kovaaks_service.scenario_by_user(scenario_name)
-        
-    def write_scenario_data(self, scenario_name: str, scenario_data: json) -> int:
-        # Parse data
-        score       = int(scenario_data["score"])
-        attributes  = scenario_data["attributes"]
-        timestamp   = int(attributes["epoch"])
-        time        = datetime.fromtimestamp(timestamp / 1000)
-        cm          = float(attributes["cm360"])
-        ttk         = float(attributes["avgTtk"])
-        acc         = int(attributes["accuracyDamage"]) / 1000
-        scoreid     = int("%04d%02d%02d%02d%02d%02d%d" % (
-                time.year,
-                time.month,
-                time.day,
-                time.hour,
-                time.minute,
-                time.second,
-                self._userid,
-            ))
-        # print(scoreid)
+    def get_scenario_data_from_api(self, scenario_name: str, verbose=False) -> list[ScenarioData]:
+        if verbose: print("Updating: %s" % scenario_data)
 
-        # results = f"score: {score}\ntime: {time.strftime(DATE_FORMAT)}\nsens: {cm}\nttk: {ttk}\nacc: {acc}%"
-        # print(results)
-
-        # SCOREID   INT  PRIMARY NOT NULL
-        # USERID    INT          NOT NULL
-        # SCENARIO  TEXT         NOT NULL
-        # TIME      INT          NOT NULL
-        # SCORE     INT          NOT NULL
-        # CM        REAL         NOT NULL
-        # TTK       REAL         NOT NULL
-        # ACC       INT          NOT NULL
-
-
-        con = sqlite3.connect(self._database)
-        cur = con.cursor()
-
-        # "INSERT INTO movie VALUES(?, ?, ?)", data
-        # Check if score is in DB
-        res = cur.execute("SELECT COUNT(1) FROM scores WHERE scoreid=%d;" % scoreid)
-        exists = res.fetchone()
-        if (exists[0] != 0):
-            print('\tScore already recorded: %d' % scoreid)
-            con.commit()
-            con.close()
-            return 1
-        insert_scores = "INSERT INTO scores \
-(scoreid, userid, scenario, timestamp, score, cm, ttk, acc) \
-VALUES (%d, %d, '%s', %d, %d, %f, %f, %d)" % (
+        scenario_data_json = self._kovaaks_service.scenario_by_user(scenario_name)
+        len_data = len(scenario_data_json)
+        if len_data == 0:
+            return []
+        scenario_datum = [None] * len_data
+        for i in range(len_data):
+            scenario_data = scenario_data_json[i]
+            score       = int(scenario_data["score"])
+            attributes  = scenario_data["attributes"]
+            timestamp   = int(attributes["epoch"])
+            time        = datetime.fromtimestamp(timestamp / 1000)
+            cm          = float(attributes["cm360"])
+            ttk         = float(attributes["avgTtk"])
+            acc         = int(attributes["accuracyDamage"]) / 1000
+            scoreid     = int("%04d%02d%02d%02d%02d%02d%d" % (
+                    time.year,
+                    time.month,
+                    time.day,
+                    time.hour,
+                    time.minute,
+                    time.second,
+                    self._userid,
+                ))
+            
+            scenario_datum[i] = ScenarioData(
                 scoreid,
                 self._userid,
                 scenario_name,
@@ -175,6 +148,40 @@ VALUES (%d, %d, '%s', %d, %d, %f, %f, %d)" % (
                 ttk,
                 acc,
             )
+        return scenario_datum
+            
+    def get_scenario_data_from_local(self, scenario_name: str) -> list[ScenarioData]:
+        stats_path = Path(KOVAAKS_STATS)
+        print(stats_path)
+        stats = stats_path.glob('*%s - *.csv' % scenario_name)
+        for stat in stats:
+            print(stat.stem)
+            # convert date in title to time stamp
+            # only take files that have a later timestamp than last update
+            with open(stat, 'r') as file:
+                csv_dict_reader = csv.DictReader(file)
+                for row in csv_dict_reader:
+                    print(row)
+                return []
+
+
+    
+
+    def write_scenario_data(self, scenario_data: ScenarioData, verbose=False) -> int:
+        con = sqlite3.connect(self._database)
+        cur = con.cursor()
+
+        # Check if score is in DB
+        res = cur.execute("SELECT COUNT(1) FROM scores WHERE scoreid=%d;" % scenario_data.scoreid)
+        exists = res.fetchone()
+        if (exists[0] != 0):
+            print('\tScore already recorded: %d' % scenario_data.scoreid)
+            con.commit()
+            con.close()
+            return 1
+        insert_scores = "INSERT INTO scores \
+(scoreid, userid, scenario, timestamp, score, cm, ttk, acc) \
+VALUES (%d, %d, '%s', %d, %d, %f, %f, %d)" % astuple(scenario_data)
         print(insert_scores)
         cur.execute(insert_scores)
 
@@ -182,22 +189,29 @@ VALUES (%d, %d, '%s', %d, %d, %f, %f, %d)" % (
         con.close()
         return 0 
 
-    def get_avasive_s1(self, difficulty: str):
-        with open('avasive_s1.csv', mode='r') as file:
+    def record_online_benchmark(self, file_name:str, difficulty: str):
+        with open(file_name, mode='r') as file:
             csv_dict_reader = csv.DictReader(file)
             for row in csv_dict_reader:
                 scenario_name = row[difficulty]
-                scenario_data = self.get_scenario_data(scenario_name)
+                scenario_datum = self.get_scenario_data_from_api(scenario_name)
                 
                 print(scenario_name)
-                if len(scenario_data) < 1:
+                if len(scenario_datum) < 1:
                     print("\tNo recorded runs")
                     continue
 
-                for data in scenario_data:
-                    self.write_scenario_data(scenario_name, data)
+                for scenario_data in scenario_datum:
+                    exit_code = self.write_scenario_data(scenario_data)
+                    # Exit once a score is already inserted
+                    if exit_code == 1:
+                        break
 
 if __name__ == "__main__":
     # get_score(KOVAAKS_USERNAME, 'beanTS')
     scribe = Scribe()
-    scribe.get_avasive_s1("med")
+    scribe.record_online_benchmark("avasive_s1.csv","med")
+    # scribe.record_online_benchmark("avasive_s1.csv","hard")
+    # scribe.record_online_benchmark("voltaic_s5.csv","hard")
+    # scribe.get_scenario_data_from_api("FreightTrack")
+    # scribe.get_scenario_data_from_local("VT Controlsphere Intermediate S5")
