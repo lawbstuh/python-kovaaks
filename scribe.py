@@ -18,30 +18,24 @@ KOVAAKS_USERNAME = os.getenv("KOVAAKS_USERNAME")
 KOVAAKS_DATABASE = os.getenv("KOVAAKS_DATABASE")
 KOVAAKS_STATS = os.getenv("KOVAAKS_STATS")
 
-# update modes: all, by difficulty, by specific?
-# store each score by date
-# store 2 tables, scenario and benchmarks
-# updating scores oupdates scenario
-
-# user table
-# schema USERS
-# USERID   INT  PRIMARY NOT NULL
-# USERNAME TEXT         NOT NULL
-
-# scenario table
-# scenario name, date (Ymd), score, accuracy, kps, cm360
-# schema SCENARIO
-# SCOREID   INT  PRIMARY NOT NULL
-# USERID    INT          NOT NULL
-# SCENARIO  TEXT         NOT NULL
-# TIME      INT          NOT NULL
-# SCORE     INT          NOT NULL
-# CM        INT          NOT NULL
-# TTK       INT          NOT NULL
-# ACC       INT          NOT NULL
-
 # ***IMPLEMENT LATER***
 # benchmarks table
+
+# CREATE TABLE IF NOT EXISTS users (
+#     userid INTEGER PRIMARY KEY AUTOINCREMENT,
+#     username TEXT NOT NULL UNIQUE
+# )
+
+# CREATE TABLE IF NOT EXISTS scores (
+#     scoreid   INT  PRIMARY KEY,
+#     userid    INT  NOT NULL,
+#     scenario  TEXT NOT NULL,
+#     timestamp INT  NOT NULL,
+#     score     REAL NOT NULL,
+#     cm        REAL NOT NULL,
+#     ttk       REAL NOT NULL,
+#     acc       INT  NOT NULL
+# )
 
 @dataclass
 class ScenarioData:
@@ -55,7 +49,11 @@ class ScenarioData:
     acc:int
 
 class Scribe:
-    def __init__(self, database: str=KOVAAKS_DATABASE, username: str=KOVAAKS_USERNAME):
+    def __init__(
+            self,
+            database: str=KOVAAKS_DATABASE,
+            username: str=KOVAAKS_USERNAME
+        ):
         self._database = database
         self._username = username
         self._kovaaks_service = Kovaaks.from_login(username)
@@ -101,44 +99,13 @@ class Scribe:
         #     userid    INT  NOT NULL,
         #     scenario  TEXT NOT NULL,
         #     timestamp INT  NOT NULL,
-        #     score     INT  NOT NULL,
-        #     cm        REAL NOT NULL,
-        #     ttk       REAL NOT NULL,
-        #     acc       INT  NOT NULL
-        # );"""
-        # cur.execute(scores_table)
-        # res = cur.execute("SELECT name FROM sqlite_master WHERE name='users'")
-        # print(res.fetchone())
-
-        # PRAGMA foreign_keys=off;
-        # BEGIN TRANSACTION;
-        # ALTER TABLE employees RENAME TO _employees_old;
-        # CREATE TABLE employees (
-        #     employee_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        #     last_name VARCHAR NOT NULL,
-        #     first_name VARCHAR,
-        #     hire_date DATE
-        # );
-        # INSERT INTO employees (employee_id, last_name, first_name, hire_date)
-        # SELECT employee_id, last_name, first_name, hire_date FROM _employees_old;
-        # DROP TABLE _employees_old;
-        # COMMIT;
-        # PRAGMA foreign_keys=on;
-
-        # scores_table = """
-        # CREATE TABLE IF NOT EXISTS scores_new (
-        #     scoreid   INT  PRIMARY KEY,
-        #     userid    INT  NOT NULL,
-        #     scenario  TEXT NOT NULL,
-        #     timestamp INT  NOT NULL,
         #     score     REAL NOT NULL,
         #     cm        REAL NOT NULL,
         #     ttk       REAL NOT NULL,
         #     acc       INT  NOT NULL);"""
-        # copy = """INSERT INTO scores_new (scoreid, userid, scenario, timestamp, score, cm, ttk, acc) SELECT scoreid, userid, scenario, timestamp, score, cm, ttk, acc FROM scores;"""
-        # rename = "ALTER TABLE scores_new RENAME TO scores"
-        # res = cur.execute(rename)
+        # res = cur.execute(scores_table)
         # print(res.fetchone())
+
         # Create offline scores
         # scores_table = """CREATE TABLE IF NOT EXISTS scores_local (
         #     scoreid   INT  PRIMARY KEY,
@@ -155,6 +122,41 @@ class Scribe:
 
         con.commit()
         con.close()
+
+    def get_scenario(self, scenario_name:str) -> dict[list[int]]:
+        con = sqlite3.connect(self._database)
+        cur = con.cursor()
+
+        # Check if score is in DB
+        res = cur.execute("SELECT cm, timestamp, score\
+                           FROM scores_local\
+                           WHERE userid=%d AND scenario='%s'\
+                           ORDER BY cm ASC, timestamp ASC;"\
+                           % (self._userid, scenario_name))
+        datum = res.fetchall()
+
+        con.close()
+        
+        return datum
+    
+    def get_scenario_pb(self, scenario_name:str) -> tuple[tuple[int]]:
+        con = sqlite3.connect(self._database)
+        cur = con.cursor()
+
+        # Get highest score by sensitivity (360/cm)
+        res = cur.execute("SELECT cm, MAX(score)\
+                           OVER (PARTITION BY cm)\
+                           FROM scores\
+                           WHERE userid=%d AND scenario='%s'\
+                           GROUP BY cm \
+                           ORDER BY cm ASC;"\
+                           % (self._userid, scenario_name))
+        datum = res.fetchall()
+
+        con.close()
+        
+        return datum
+
 
     def get_scenario_data_from_api(self, scenario_name: str, verbose=False) -> list[ScenarioData]:
         if verbose: print("Updating: %s" % scenario_data)
@@ -300,7 +302,7 @@ VALUES (%d, %d, '%s', %d, %d, %f, %f, %d)" % astuple(scenario_data)
         con.close()
         return 0 
 
-    def record_benchmark(self, file_name:str, difficulty: str, from_api=True):
+    def record_benchmark(self, file_name:str, difficulty: str, from_api=True) -> None:
         print('Recording scores from %s' % 'Kovaaks API' if from_api else 'local files')
         
         with open(file_name, mode='r') as file:
