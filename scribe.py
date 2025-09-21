@@ -4,10 +4,14 @@ from pathlib import Path
 import csv
 import json
 import sqlite3
+
+import re
 from datetime import datetime
 from collections import defaultdict
 from dataclasses import astuple, dataclass
-import re
+from typing import Iterable
+
+import numpy as np
 
 from kovaaks import Kovaaks
 
@@ -37,16 +41,116 @@ KOVAAKS_STATS = os.getenv("KOVAAKS_STATS")
 #     acc       INT  NOT NULL
 # )
 
-@dataclass
+
+@dataclass(frozen=True)
 class ScenarioData:
-    scoreid:int
-    userid:int
+    '''
+    External class with scenario scores and data
+    '''
     scenario_name:str
     timestamp:int
     score:float
     cm:float
     ttk:float
     acc:int
+
+    @property
+    def ymd(self) -> int:
+        date = datetime.fromtimestamp(self.timestamp / 1000)
+        return int('%04d%02d%02d' % (date.year, date.month, date.day))
+
+@dataclass(frozen=True)
+class _ScenarioData(ScenarioData):
+    '''
+    Internal dataclass for inserting data into database.
+    '''
+    scoreid:int
+    userid:int
+
+class MultipleInitException(Exception):
+    pass
+
+class ScenarioDatum:
+    def __init__(self, datum:Iterable[ScenarioData]):
+        self._datum:tuple[ScenarioData] = tuple(datum)
+        self._datum_len = len(self._datum)
+        self._cm:list[float] # = [i for i in range(20, 90, 10)]
+        self._date:list[float]
+
+        self._scores:list[float]
+
+        self._bin_by_day()
+    
+        # Create a n*m array
+        # n = len(cm)
+        # m = len(date)
+        # cm = unique sensitivities
+        # date = unique dates
+        # TODO: extrapolate missing dates / fill with zeros
+
+    def __len__(self):
+        return self._datum_len
+
+    @property
+    def datum(self):
+        return self._datum
+    
+    @property
+    def cm(self):
+        return self._cm
+
+    @property
+    def date(self):
+        return self._date
+    
+    @property
+    def scores(self):
+        return self._scores
+
+    # day, cm, score
+    # every date there is, we need the range of scores
+
+    def _bin_by_day(self):
+        # if (self._cm and self._datum_index_by_day):
+        #     raise MultipleInitException("ScenarioDatum initialized more than once")
+
+        cm = set()
+        date = set()
+        # date_and_index = defaultdict(list)
+
+        for i in range(self._datum_len):
+            data = self._datum[i]
+
+            cm.add(data.cm)
+            date.add(data.ymd)
+
+            # data_date = data.ymd
+            # date_and_index[data_date].append(i)
+
+        self._cm = sorted(list(cm))
+        self._date = sorted(list(date))
+
+        len_cm = len(cm)
+        len_date = len(date)
+        scores = [0] * (len_cm * len_date)
+
+        for data_index in range(self._datum_len):
+            data = self._datum[data_index]
+
+            i = self._cm.index(data.cm)
+            j = self._date.index(data.ymd)
+            score_index = j * i + j
+            scores[score_index] = max(scores[score_index], data.score)
+
+        self._scores = scores
+            
+
+
+    def get_sens(self) -> list[int]:
+        if not self._cm:
+            self._cm = set(map(lambda data: data.cm), self._datum)
+        return self._cm
+
 
 class Scribe:
     def __init__(
@@ -123,42 +227,58 @@ class Scribe:
         con.commit()
         con.close()
 
-    def get_scenario(self, scenario_name:str) -> dict[list[int]]:
+    def get_scenario(self, scenario_name:str, local=True) -> ScenarioDatum:
         con = sqlite3.connect(self._database)
         cur = con.cursor()
 
+        if local:
         # Check if score is in DB
-        res = cur.execute("SELECT cm, timestamp, score\
-                           FROM scores_local\
-                           WHERE userid=%d AND scenario='%s'\
-                           ORDER BY cm ASC, timestamp ASC;"\
-                           % (self._userid, scenario_name))
+            res = cur.execute("SELECT timestamp, score, cm, ttk, acc\
+                            FROM scores_local\
+                            WHERE userid=%d AND scenario='%s'\
+                            ORDER BY cm ASC, timestamp ASC;"\
+                            % (self._userid, scenario_name))
+        else:
+            res = cur.execute("SELECT timestamp, score, cm, ttk, acc\
+                            FROM scores\
+                            WHERE userid=%d AND scenario='%s'\
+                            ORDER BY cm ASC, timestamp ASC;"\
+                            % (self._userid, scenario_name))
         datum = res.fetchall()
 
         con.close()
         
-        return datum
+        data_map = map(lambda data:ScenarioData(scenario_name, *data), datum)
+        return ScenarioDatum(data_map)
     
-    def get_scenario_pb(self, scenario_name:str) -> tuple[tuple[int]]:
+    def get_scenario_pb(self, scenario_name:str, local=True) -> tuple[tuple[int]]:
         con = sqlite3.connect(self._database)
         cur = con.cursor()
 
         # Get highest score by sensitivity (360/cm)
-        res = cur.execute("SELECT cm, MAX(score)\
-                           OVER (PARTITION BY cm)\
-                           FROM scores\
-                           WHERE userid=%d AND scenario='%s'\
-                           GROUP BY cm \
-                           ORDER BY cm ASC;"\
-                           % (self._userid, scenario_name))
+        if local:
+            res = cur.execute("SELECT cm, MAX(score)\
+                            OVER (PARTITION BY cm)\
+                            FROM scores_local\
+                            WHERE userid=%d AND scenario='%s'\
+                            GROUP BY cm \
+                            ORDER BY cm ASC;"\
+                            % (self._userid, scenario_name))
+        else:
+            res = cur.execute("SELECT cm, MAX(score)\
+                            OVER (PARTITION BY cm)\
+                            FROM scores\
+                            WHERE userid=%d AND scenario='%s'\
+                            GROUP BY cm \
+                            ORDER BY cm ASC;"\
+                            % (self._userid, scenario_name))
         datum = res.fetchall()
 
         con.close()
         
         return datum
 
-
-    def get_scenario_data_from_api(self, scenario_name: str, verbose=False) -> list[ScenarioData]:
+    def get_scenario_data_from_api(self, scenario_name: str, verbose=False) -> list[_ScenarioData]:
         if verbose: print("Updating: %s" % scenario_data)
 
         scenario_data_json = self._kovaaks_service.scenario_by_user(scenario_name)
@@ -185,7 +305,7 @@ class Scribe:
                     self._userid,
                 ))
             
-            scenario_datum[i] = ScenarioData(
+            scenario_datum[i] = _ScenarioData(
                 scoreid=scoreid,
                 userid=self._userid,
                 scenario_name=scenario_name,
@@ -198,7 +318,7 @@ class Scribe:
         if verbose: print(astuple(scenario_datum[0]))
         return scenario_datum
             
-    def get_scenario_data_from_local(self, scenario_name: str, verbose=False) -> list[ScenarioData]:
+    def get_scenario_data_from_local(self, scenario_name: str, verbose=False) -> list[_ScenarioData]:
         stats_path = Path(KOVAAKS_STATS)
         if verbose: print(stats_path)
         stats = stats_path.glob('*%s - Challenge - *.csv' % scenario_name)
@@ -233,7 +353,7 @@ class Scribe:
                 acc = hit / (hit + miss)
             
             
-            scenario_data = ScenarioData(
+            scenario_data = _ScenarioData(
                 scoreid=scoreid,
                 userid=self._userid,
                 scenario_name=scenario_name,
@@ -254,7 +374,7 @@ class Scribe:
 
         return scenario_datum
 
-    def write_scenario_data_from_api(self, scenario_data: ScenarioData, verbose=False) -> int:
+    def write_scenario_data_from_api(self, scenario_data: _ScenarioData, verbose=False) -> int:
         con = sqlite3.connect(self._database)
         cur = con.cursor()
 
@@ -278,7 +398,7 @@ VALUES (%d, %d, '%s', %d, %d, %f, %f, %d)" % astuple(scenario_data)
         con.close()
         return 0 
     
-    def write_scenario_data_from_local(self, scenario_data: ScenarioData, verbose=False) -> int:
+    def write_scenario_data_from_local(self, scenario_data: _ScenarioData, verbose=False) -> int:
         con = sqlite3.connect(self._database)
         cur = con.cursor()
 
@@ -302,8 +422,8 @@ VALUES (%d, %d, '%s', %d, %d, %f, %f, %d)" % astuple(scenario_data)
         con.close()
         return 0 
 
-    def record_benchmark(self, file_name:str, difficulty: str, from_api=True) -> None:
-        print('Recording scores from %s' % 'Kovaaks API' if from_api else 'local files')
+    def record_benchmark(self, file_name:str, difficulty: str, local=True) -> None:
+        print('Recording scores from %s' % 'Kovaaks API' if local else 'local files')
         
         with open(file_name, mode='r') as file:
             csv_dict_reader = csv.DictReader(file)
@@ -311,20 +431,7 @@ VALUES (%d, %d, '%s', %d, %d, %f, %f, %d)" % astuple(scenario_data)
                 scenario_name = row[difficulty]
                 print(scenario_name)
 
-                if from_api:
-                    scenario_datum = self.get_scenario_data_from_api(scenario_name)
-                    
-                    if len(scenario_datum) < 1:
-                        print("\tNo recorded runs")
-                        continue
-
-                    for scenario_data in scenario_datum:
-                        exit_code = self.write_scenario_data_from_api(scenario_data, True)
-                        # Exit once a score is already inserted
-                        if exit_code == 1:
-                            break
-
-                else: # Get scenario data from local
+                if local: # Get scenario data from local
                     scenario_datum = self.get_scenario_data_from_local(scenario_name)
 
                     if len(scenario_datum) < 1:
@@ -336,6 +443,24 @@ VALUES (%d, %d, '%s', %d, %d, %f, %f, %d)" % astuple(scenario_data)
                         # Exit once a score is already inserted
                         if exit_code == 1:
                             break
+                else:
+                    try:
+                        scenario_datum = self.get_scenario_data_from_api(scenario_name)
+                    except(Exception) as excpt:
+                        print("\tGet failed:\n\n\t%s" % str(excpt))
+                        return
+
+                    
+                    if len(scenario_datum) < 1:
+                        print("\tNo recorded runs")
+                        continue
+
+                    for scenario_data in scenario_datum:
+                        exit_code = self.write_scenario_data_from_api(scenario_data, True)
+                        # Exit once a score is already inserted
+                        if exit_code == 1:
+                            break
+
 
     def _test_db(self):
         con = sqlite3.connect(self._database)
@@ -352,10 +477,12 @@ VALUES (%d, %d, '%s', %d, %d, %f, %f, %d)" % astuple(scenario_data)
 if __name__ == "__main__":
     # get_score(KOVAAKS_USERNAME, 'beanTS')
     scribe = Scribe()
-    # scribe.record_benchmark("avasive_s1.csv","med")
-    # scribe.record_benchmark("avasive_s1.csv","hard")
-    # scribe.record_benchmark("voltaic_s5.csv","hard")
+    # scribe.record_benchmark("avasive_s1.csv","med",local=False)
+    # scribe.record_benchmark("avasive_s1.csv","hard",local=False)
+    # scribe.record_benchmark("voltaic_s5.csv","easy",local=False)
+    # scribe.record_benchmark("voltaic_s5.csv","med",local=False)
+    # scribe.record_benchmark("voltaic_s5.csv","hard",local=False)
     # scribe.get_scenario_data_from_api("FreightTrack")
     # scribe.get_scenario_data_from_local("VT ControlTS Intermediate S5", True)
-    # scribe.record_benchmark("voltaic_s5.csv", "med", from_api=False)
-    scribe.record_benchmark("avasive_s1.csv","med", from_api=False)
+    scribe.record_benchmark("voltaic_s5.csv", "hard")
+    scribe.record_benchmark("avasive_s1.csv","med")

@@ -26,6 +26,7 @@ class View:
 
     def plot_scenario_pb(self, scenario_name:str) -> None:
         score_by_cm = self._scribe.get_scenario_pb(scenario_name)
+        print(score_by_cm)
 
         x, y = map(list, zip(*score_by_cm))
 
@@ -48,23 +49,35 @@ class View:
         score_by_cm = self._scribe.get_scenario(scenario_name)
 
     def plot_3d(self, scenario_name:str) -> None:
-        score_by_cm = self._scribe.get_scenario(scenario_name)
-        for s in score_by_cm:
-            print(s)
-
-
+        scenario_datum = self._scribe.get_scenario(scenario_name)
 
         fig = plt.figure(figsize=(10, 7))
         ax = fig.add_subplot(111, projection='3d')
 
+        len_x = len(scenario_datum.date)
+        len_y = len(scenario_datum.cm)
+        _x = np.arange(len_x)
+        _y = np.arange(len_y)
+        _xx, _yy = np.meshgrid(_x, _y)
+        x, y = _xx.ravel(), _yy.ravel()
+
+        bottom = np.array([0] * (len_x * len_y))
+        width = 1
+        depth = 1
+        top = np.array(scenario_datum.scores)
+
+        ax.bar3d(x, y, bottom, width, depth, top, edgecolor='black', shade=True)
+
         ax.set_xlabel('Date')
         ax.set_ylabel('cm/360')
         ax.set_zlabel('Score')
-        # ax.set_yticks(list(store_ids.values()))
-        # ax.set_yticklabels(list(store_ids.keys()))
+        # ax.set_yticks(range(len_x))
+        ax.set_yticklabels(scenario_datum.date)
+        # ax.set_yticks(range(len_y))
+        ax.set_yticklabels(scenario_datum.cm)
         ax.set_title(scenario_name)
 
-        # plt.show()
+        plt.show()
 
 def sample_plot():
     # Sample data: Months (1 to 12)
@@ -98,5 +111,6 @@ def sample_plot():
 
 if __name__ == "__main__":
     view = View()
-    view.plot_3d("VT Controlsphere Intermediate S5")
+    # view.plot_3d("VT Controlsphere Intermediate S5")
+    view.plot_3d("VT ww5t Intermediate S5")
     # view.plot_scenario_pb("FreightTrack")
